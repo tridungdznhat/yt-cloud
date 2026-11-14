@@ -1,0 +1,71 @@
+name: Windows YouTube VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      tool_url:
+        description: 'URL Trang Web Tool làm video'
+        required: true
+        type: string
+      cookies_b64:
+        description: 'Base64 YouTube Cookies JSON'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  youtube_vps:
+    runs-on: windows-latest
+    timeout-minutes: 300
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Cài đặt Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cài đặt thư viện điều khiển trình duyệt & Cloudflare Tunnel
+        run: |
+          pip install flask playwright requests
+          playwright install chromium
+          Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+
+      - name: Khởi chạy Trình duyệt VPS & Gửi màn hình về Localhost
+        env:
+          TOOL_URL: ${{ inputs.tool_url }}
+          COOKIES_B64: ${{ inputs.cookies_b64 }}
+        run: |
+          Start-Process python -ArgumentList "cloud_worker.py" -NoNewWindow
+          Start-Sleep -Seconds 5
+
+          Start-Process .\cloudflared.exe -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError "tunnel.log" -NoNewWindow
+          
+          $url = ""
+          for ($i = 0; $i -lt 30; $i++) {
+            Start-Sleep -Seconds 2
+            if (Test-Path "tunnel.log") {
+              $content = Get-Content "tunnel.log" -Raw
+              if ($content -match "https://[a-zA-Z0-9-]+\.trycloudflare\.com") {
+                $url = $matches[0]
+                break
+              }
+            }
+          }
+
+          Write-Host "Link điều khiển trực tiếp VPS: $url"
+          $json = @{ url = $url; updated_at = (Get-Date).ToString() } | ConvertTo-Json
+          $json | Out-File -FilePath "vps_live.json" -Encoding utf8
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add vps_live.json
+          git commit -m "Update live VPS stream URL"
+          git push
+
+          # Giữ VPS hoạt động để bạn làm việc
+          Start-Sleep -Seconds 14400
