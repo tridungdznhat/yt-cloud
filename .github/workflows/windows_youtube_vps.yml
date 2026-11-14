@@ -23,6 +23,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Cài đặt Python 3.11
         uses: actions/setup-python@v5
@@ -40,13 +42,16 @@ jobs:
           TOOL_URL: ${{ inputs.tool_url }}
           COOKIES_B64: ${{ inputs.cookies_b64 }}
         run: |
-          Start-Process python -ArgumentList "cloud_worker.py" -NoNewWindow
-          Start-Sleep -Seconds 5
+          # 1. Khởi chạy trình duyệt và máy chủ hình ảnh ở cổng 8080
+          Start-Process python -ArgumentList "cloud_worker.py" -RedirectStandardOutput "worker_out.log" -RedirectStandardError "worker_err.log" -NoNewWindow
+          Start-Sleep -Seconds 6
 
-          Start-Process .\cloudflared.exe -ArgumentList "tunnel --url http://127.0.0.1:8080" -RedirectStandardError "tunnel.log" -NoNewWindow
-          
+          # 2. Mở đường hầm Cloudflare kết nối vào cổng 8080
+          Start-Process .\cloudflared.exe -ArgumentList "tunnel --url http://127.0.0.1:8080 --no-autoupdate --protocol http2" -RedirectStandardError "tunnel.log" -NoNewWindow
+
+          # 3. Chờ và lấy đường link trycloudflare.com mới nhất
           $url = ""
-          for ($i = 0; $i -lt 30; $i++) {
+          for ($i = 0; $i -lt 35; $i++) {
             Start-Sleep -Seconds 2
             if (Test-Path "tunnel.log") {
               $content = Get-Content "tunnel.log" -Raw
@@ -57,15 +62,33 @@ jobs:
             }
           }
 
-          Write-Host "Link điều khiển trực tiếp VPS: $url"
-          $json = @{ url = $url; updated_at = (Get-Date).ToString() } | ConvertTo-Json
-          $json | Out-File -FilePath "vps_live.json" -Encoding utf8
+          if ($url -eq "") {
+            Write-Error "Không lấy được link Cloudflare Tunnel!"
+            exit 1
+          }
 
+          Write-Host "=========================================="
+          Write-Host "Link điều khiển trực tiếp VPS: $url"
+          Write-Host "=========================================="
+
+          # 4. Đồng bộ nhánh main trước khi ghi file để không bị lỗi xung đột Git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add vps_live.json
-          git commit -m "Update live VPS stream URL"
-          git push
+          git pull --rebase origin main
 
-          # Giữ VPS hoạt động để bạn làm việc
-          Start-Sleep -Seconds 14400
+          # 5. Lưu link mới vào vps_live.json và đẩy lên GitHub
+          $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+          $json = @{ url = $url; timestamp = $epoch } | ConvertTo-Json
+          $json | Out-File -FilePath "vps_live.json" -Encoding utf8
+
+          git add vps_live.json
+          git commit -m "Update live VPS stream URL ($epoch)"
+          git push origin HEAD:main
+
+          # 6. Giữ VPS hoạt động liên tục (4 tiếng) và in log nếu có lỗi phát sinh
+          for ($m = 0; $m -lt 240; $m++) {
+            Start-Sleep -Seconds 60
+            if (Test-Path "worker_err.log") {
+              Get-Content "worker_err.log" -Tail 5
+            }
+          }
