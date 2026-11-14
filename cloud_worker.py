@@ -1,10 +1,9 @@
 import os
-import io
 import json
 import time
+import queue
 import base64
 import threading
-import requests
 from flask import Flask, Response, request, jsonify, render_template_string
 from playwright.sync_api import sync_playwright
 
@@ -13,13 +12,12 @@ app = Flask(__name__)
 DOWNLOAD_DIR = r"C:\YT_Downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Biến toàn cục quản lý trạng thái trình duyệt trên VPS
+# Bộ nhớ đệm dùng chung an toàn giữa luồng Trình duyệt và luồng Flask
 state = {
-    "context": None,
-    "active_page": None,
-    "pages": [],
+    "screenshot": None,
     "latest_video": None,
-    "lock": threading.Lock()
+    "status_text": "Đang khởi động trình duyệt trên VPS...",
+    "action_queue": queue.Queue()
 }
 
 REMOTE_UI_HTML = """
@@ -33,7 +31,6 @@ REMOTE_UI_HTML = """
     </style>
 </head>
 <body class="flex flex-col h-screen">
-    <!-- Thanh công cụ điều khiển trình duyệt trên VPS -->
     <div class="bg-slate-900 border-b border-slate-700 p-2 flex flex-wrap items-center justify-between gap-2 text-xs">
         <div class="flex items-center gap-2">
             <button onclick="switchTab(0)" class="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 rounded font-semibold">
@@ -47,13 +44,10 @@ REMOTE_UI_HTML = """
             </button>
         </div>
 
-        <!-- Thanh gõ Tiếng Việt & Phím tắt gửi thẳng vào trình duyệt VPS -->
         <div class="flex items-center gap-1.5 flex-1 max-w-xl">
             <input type="text" id="vn_text" placeholder="Gõ Tiếng Việt (Tiêu đề, Mô tả, nội dung...) rồi bấm Gửi Chữ" 
                    class="flex-1 px-2.5 py-1.5 rounded bg-slate-800 border border-slate-600 text-white text-xs">
-            <button onclick="sendText()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded font-semibold">
-                Gửi Chữ
-            </button>
+            <button onclick="sendText()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded font-semibold">Gửi Chữ</button>
             <button onclick="sendKey('Enter')" class="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">Enter</button>
             <button onclick="sendKey('Backspace')" class="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">Xóa</button>
             <button onclick="scrollPage(-400)" class="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">▲ Lên</button>
@@ -61,11 +55,10 @@ REMOTE_UI_HTML = """
         </div>
 
         <div id="file-status" class="text-emerald-400 font-mono text-[11px]">
-            Chưa có file tải về
+            Đang kết nối hình ảnh...
         </div>
     </div>
 
-    <!-- Màn hình trực tiếp của Trình duyệt VPS -->
     <div class="flex-1 flex items-center justify-center bg-black overflow-auto">
         <img id="screen" src="/screenshot" class="cursor-crosshair select-none max-w-full max-h-full" 
              onclick="handleClick(event)" draggable="false" />
@@ -74,26 +67,22 @@ REMOTE_UI_HTML = """
     <script>
         const img = document.getElementById('screen');
 
-        // Cập nhật hình ảnh trình duyệt liên tục
         setInterval(() => {
             img.src = '/screenshot?t=' + Date.now();
-        }, 450);
+        }, 400);
 
-        // Kiểm tra file đã tải xong trên VPS chưa
         setInterval(async () => {
             const res = await fetch('/status');
             const data = await res.json();
-            if (data.latest_video) {
-                document.getElementById('file-status').innerText = "✅ Đã tải: " + data.latest_video;
-            }
-        }, 2500);
+            const label = data.latest_video ? ("✅ Đã tải: " + data.latest_video) : data.status_text;
+            document.getElementById('file-status').innerText = label;
+        }, 2000);
 
         async function handleClick(e) {
             const rect = img.getBoundingClientRect();
-            const scaleX = 1280 / rect.width;
-            const scaleY = 720 / rect.height;
-            const x = Math.round((e.clientX - rect.left) * scaleX);
-            const y = Math.round((e.clientY - rect.top) * scaleY);
+            if (!rect.width || !rect.height) return;
+            const x = Math.round((e.clientX - rect.left) * (1280 / rect.width));
+            const y = Math.round((e.clientY - rect.top) * (720 / rect.height));
             await fetch('/action', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -150,36 +139,132 @@ REMOTE_UI_HTML = """
 </html>
 """
 
-def normalize_cookies(raw_cookies):
-    cookies = json.loads(raw_cookies)
-    valid = []
-    for c in cookies:
-        item = {
-            "name": c["name"],
-            "value": c["value"],
-            "domain": c.get("domain", ".youtube.com"),
-            "path": c.get("path", "/"),
-            "secure": bool(c.get("secure", True)),
-            "httpOnly": bool(c.get("httpOnly", False)),
-        }
-        ss = str(c.get("sameSite", "")).lower()
-        item["sameSite"] = ss.capitalize() if ss in ["strict", "lax", "none"] else "Lax"
-        valid.append(item)
-    return valid
-
 def handle_download(download):
-    """Tự động bắt mọi file người dùng tải về từ Web Tool và lưu vào ổ cứng VPS."""
     save_path = os.path.join(DOWNLOAD_DIR, download.suggested_filename)
-    print(f"[*] Đang tải file từ Web Tool về VPS: {save_path}")
+    print(f"[*] Đang tải file về VPS: {save_path}", flush=True)
     download.save_as(save_path)
     state["latest_video"] = save_path
-    print(f"[+] Đã tải xong về VPS: {save_path}")
+    state["status_text"] = f"Đã tải xong: {download.suggested_filename}"
+    print(f"[+] Hoàn tất tải về: {save_path}", flush=True)
 
-def attach_page_listeners(page):
-    page.set_viewport_size({"width": 1280, "height": 720})
-    page.on("download", handle_download)
-    state["pages"].append(page)
-    state["active_page"] = page
+def safe_add_cookies(context, cookies_raw):
+    try:
+        cookies = json.loads(cookies_raw)
+        if not isinstance(cookies, list):
+            return
+        added = 0
+        for c in cookies:
+            try:
+                item = {
+                    "name": str(c["name"]),
+                    "value": str(c["value"]),
+                    "domain": c.get("domain", ".youtube.com"),
+                    "path": c.get("path", "/"),
+                    "secure": bool(c.get("secure", True)),
+                    "httpOnly": bool(c.get("httpOnly", False)),
+                }
+                ss = str(c.get("sameSite", "")).lower()
+                item["sameSite"] = ss.capitalize() if ss in ["strict", "lax", "none"] else "Lax"
+                context.add_cookies([item])
+                added += 1
+            except Exception:
+                continue
+        print(f"[+] Đã nạp thành công {added} cookies.", flush=True)
+    except Exception as e:
+        print(f"[!] Bỏ qua lỗi định dạng Cookie: {e}", flush=True)
+
+def browser_worker():
+    tool_url = os.environ.get("TOOL_URL", "https://www.google.com").strip() or "https://www.google.com"
+    cookies_b64 = os.environ.get("COOKIES_B64", "")
+    cookies_raw = ""
+    if cookies_b64:
+        try:
+            cookies_raw = base64.b64decode(cookies_b64.encode("utf-8")).decode("utf-8")
+        except Exception as e:
+            print("Lỗi giải mã cookie:", e, flush=True)
+
+    with sync_playwright() as p:
+        # Chạy trình duyệt với cấu hình chống phát hiện bot và tương thích màn hình ảo Windows Server
+        browser = p.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--window-size=1280,720",
+                "--no-sandbox"
+            ]
+        )
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 720},
+            accept_downloads=True,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+        )
+
+        pages = []
+
+        def on_new_page(new_p):
+            new_p.set_viewport_size({"width": 1280, "height": 720})
+            new_p.on("download", handle_download)
+            if new_p not in pages:
+                pages.append(new_p)
+
+        context.on("page", on_new_page)
+
+        if cookies_raw:
+            safe_add_cookies(context, cookies_raw)
+
+        # Tab 1: Mở trang Web Tool
+        page1 = context.new_page()
+        state["status_text"] = "Đang mở Tab 1 (Web Tool)..."
+        try:
+            page1.goto(tool_url, wait_until="domcontentloaded", timeout=35000)
+        except Exception as e:
+            print(f"[!] Tab 1 tải lâu nhưng vẫn tiếp tục: {e}", flush=True)
+
+        # Tab 2: Mở YouTube Studio
+        page2 = context.new_page()
+        state["status_text"] = "Đang mở Tab 2 (YouTube Studio)..."
+        try:
+            page2.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=35000)
+        except Exception as e:
+            print(f"[!] Tab 2 tải lâu nhưng vẫn tiếp tục: {e}", flush=True)
+
+        active_page = page1
+        state["status_text"] = "🟢 Sẵn sàng thao tác (Chưa có file tải về)"
+
+        # Vòng lặp chính: vừa xử lý thao tác chuột/phím, vừa cập nhật ảnh màn hình trên cùng 1 luồng
+        while True:
+            while not state["action_queue"].empty():
+                act = state["action_queue"].get_nowait()
+                act_type = act.get("type")
+                try:
+                    if act_type == "click":
+                        active_page.mouse.click(act["x"], act["y"])
+                    elif act_type == "fill_text":
+                        active_page.keyboard.insert_text(act["text"])
+                    elif act_type == "press":
+                        active_page.keyboard.press(act["key"])
+                    elif act_type == "scroll":
+                        active_page.mouse.wheel(0, act["deltaY"])
+                    elif act_type == "switch_tab":
+                        idx = act.get("index", 0)
+                        if 0 <= idx < len(pages):
+                            active_page = pages[idx]
+                    elif act_type == "upload_to_yt":
+                        if state["latest_video"] and os.path.exists(state["latest_video"]):
+                            active_page = pages[1]
+                            active_page.goto("https://www.youtube.com/upload", wait_until="domcontentloaded", timeout=30000)
+                            time.sleep(3)
+                            active_page.locator('input[type="file"]').first.set_input_files(state["latest_video"])
+                            state["status_text"] = "✅ Đã nạp video vào YouTube Studio!"
+                except Exception as e:
+                    print(f"[!] Lỗi thực thi thao tác {act_type}: {e}", flush=True)
+
+            try:
+                state["screenshot"] = active_page.screenshot(type="jpeg", quality=70)
+            except Exception as e:
+                print(f"[!] Lỗi chụp màn hình: {e}", flush=True)
+
+            time.sleep(0.25)
 
 @app.route("/")
 def index():
@@ -188,96 +273,31 @@ def index():
 @app.route("/status")
 def get_status():
     name = os.path.basename(state["latest_video"]) if state["latest_video"] else None
-    return jsonify({"latest_video": name})
+    return jsonify({
+        "latest_video": name,
+        "status_text": state["status_text"]
+    })
 
 @app.route("/screenshot")
 def screenshot():
-    with state["lock"]:
-        page = state.get("active_page")
-        if not page:
-            return Response(status=204)
-        try:
-            img_bytes = page.screenshot(type="jpeg", quality=70)
-            return Response(img_bytes, mimetype="image/jpeg")
-        except Exception:
-            return Response(status=204)
+    img = state.get("screenshot")
+    if not img:
+        return Response(status=204)
+    return Response(img, mimetype="image/jpeg")
 
 @app.route("/action", methods=["POST"])
 def action():
     data = request.json
-    act_type = data.get("type")
+    if data.get("type") == "upload_to_yt":
+        if not state["latest_video"] or not os.path.exists(state["latest_video"]):
+            return jsonify({"message": "Chưa có video nào được tải về trên VPS!"})
+        state["action_queue"].put(data)
+        return jsonify({"message": "Đang chuyển sang Tab YouTube và nạp video..."})
 
-    with state["lock"]:
-        page = state.get("active_page")
-        if not page:
-            return jsonify({"ok": False})
-
-        try:
-            if act_type == "click":
-                page.mouse.click(data["x"], data["y"])
-            elif act_type == "fill_text":
-                page.keyboard.insert_text(data["text"])
-            elif act_type == "press":
-                page.keyboard.press(data["key"])
-            elif act_type == "scroll":
-                page.mouse.wheel(0, data["deltaY"])
-            elif act_type == "switch_tab":
-                idx = data.get("index", 0)
-                if 0 <= idx < len(state["pages"]):
-                    state["active_page"] = state["pages"][idx]
-                    state["active_page"].bring_to_front()
-            elif act_type == "upload_to_yt":
-                if not state["latest_video"] or not os.path.exists(state["latest_video"]):
-                    return jsonify({"message": "Chưa có video nào được tải về từ Web Tool!"})
-                # Chuyển sang Tab 2 (YouTube) và mở khung Upload
-                yt_page = state["pages"][1]
-                state["active_page"] = yt_page
-                yt_page.bring_to_front()
-                yt_page.goto("https://www.youtube.com/upload", wait_until="domcontentloaded")
-                time.sleep(4)
-                yt_page.locator('input[type="file"]').set_input_files(state["latest_video"])
-                return jsonify({"message": "Đã đẩy video vào YouTube Studio! Bạn có thể chỉnh sửa Tiêu đề, Mô tả, Thumbnail ngay trên màn hình."})
-        except Exception as e:
-            print("Lỗi thao tác:", e)
-
+    state["action_queue"].put(data)
     return jsonify({"ok": True})
-
-def browser_worker():
-    tool_url = os.environ.get("TOOL_URL", "https://www.google.com")
-    cookies_b64 = os.environ.get("COOKIES_B64", "")
-    cookies_raw = base64.b64decode(cookies_b64.encode("utf-8")).decode("utf-8")
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 720},
-            accept_downloads=True
-        )
-        state["context"] = context
-        context.on("page", attach_page_listeners)
-
-        if cookies_raw:
-            context.add_cookies(normalize_cookies(cookies_raw))
-
-        # Tab 1: Mở trang Web Tool của bạn
-        page1 = context.new_page()
-        attach_page_listeners(page1)
-        page1.goto(tool_url, wait_until="domcontentloaded", timeout=60000)
-
-        # Tab 2: Mở sẵn YouTube Studio với Cookie đã nạp
-        page2 = context.new_page()
-        attach_page_listeners(page2)
-        page2.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=60000)
-
-        # Quay lại Tab 1 để bạn bắt đầu làm video
-        state["active_page"] = page1
-        page1.bring_to_front()
-
-        # Giữ trình duyệt chạy suốt phiên làm việc (tối đa 5 tiếng)
-        while True:
-            time.sleep(1)
 
 if __name__ == "__main__":
     t = threading.Thread(target=browser_worker, daemon=True)
     t.start()
-    app.run(host="127.0.0.1", port=8080, threaded=False)
+    app.run(host="127.0.0.1", port=8080, threaded=True)
