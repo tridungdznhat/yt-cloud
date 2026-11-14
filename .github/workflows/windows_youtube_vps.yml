@@ -15,6 +15,11 @@ on:
 permissions:
   contents: write
 
+# Tự động hủy VPS cũ đang chạy nếu bạn bấm bật VPS mới
+concurrency:
+  group: windows-youtube-vps-group
+  cancel-in-progress: true
+
 jobs:
   youtube_vps:
     runs-on: windows-latest
@@ -39,17 +44,30 @@ jobs:
 
       - name: Khởi chạy Trình duyệt VPS & Gửi màn hình về Localhost
         env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
           TOOL_URL: ${{ inputs.tool_url }}
           COOKIES_B64: ${{ inputs.cookies_b64 }}
         run: |
           # 1. Khởi chạy trình duyệt và máy chủ hình ảnh ở cổng 8080
           Start-Process python -ArgumentList "cloud_worker.py" -RedirectStandardOutput "worker_out.log" -RedirectStandardError "worker_err.log" -NoNewWindow
-          Start-Sleep -Seconds 6
 
-          # 2. Mở đường hầm Cloudflare kết nối vào cổng 8080
+          # 2. Chờ máy chủ Flask (cổng 8080) trên VPS mở thành công
+          for ($w = 0; $w -lt 20; $w++) {
+            Start-Sleep -Seconds 2
+            try {
+              $res = Invoke-WebRequest -Uri "http://127.0.0.1:8080/status" -UseBasicParsing -TimeoutSec 2
+              if ($res.StatusCode -eq 200) {
+                Write-Host "Máy chủ cổng 8080 đã sẵn sàng!"
+                break
+              }
+            } catch {}
+          }
+
+          # 3. Mở đường hầm Cloudflare kết nối vào cổng 8080
           Start-Process .\cloudflared.exe -ArgumentList "tunnel --url http://127.0.0.1:8080 --no-autoupdate --protocol http2" -RedirectStandardError "tunnel.log" -NoNewWindow
 
-          # 3. Chờ và lấy đường link trycloudflare.com mới nhất
+          # 4. Chờ và lấy đường link trycloudflare.com mới nhất
           $url = ""
           for ($i = 0; $i -lt 35; $i++) {
             Start-Sleep -Seconds 2
@@ -64,6 +82,7 @@ jobs:
 
           if ($url -eq "") {
             Write-Error "Không lấy được link Cloudflare Tunnel!"
+            if (Test-Path "worker_err.log") { Get-Content "worker_err.log" }
             exit 1
           }
 
@@ -71,21 +90,20 @@ jobs:
           Write-Host "Link điều khiển trực tiếp VPS: $url"
           Write-Host "=========================================="
 
-          # 4. Đồng bộ nhánh main trước khi ghi file để không bị lỗi xung đột Git
+          # 5. Lưu link mới vào vps_live.json (chuẩn UTF-8 không BOM) và đẩy lên GitHub
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git pull --rebase origin main
 
-          # 5. Lưu link mới vào vps_live.json và đẩy lên GitHub
           $epoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
           $json = @{ url = $url; timestamp = $epoch } | ConvertTo-Json
-          $json | Out-File -FilePath "vps_live.json" -Encoding utf8
+          [System.IO.File]::WriteAllText("$PWD\vps_live.json", $json)
 
           git add vps_live.json
           git commit -m "Update live VPS stream URL ($epoch)"
           git push origin HEAD:main
 
-          # 6. Giữ VPS hoạt động liên tục (4 tiếng) và in log nếu có lỗi phát sinh
+          # 6. Giữ VPS hoạt động liên tục (4 tiếng) và in log nếu có lỗi
           for ($m = 0; $m -lt 240; $m++) {
             Start-Sleep -Seconds 60
             if (Test-Path "worker_err.log") {
