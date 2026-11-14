@@ -12,7 +12,6 @@ app = Flask(__name__)
 DOWNLOAD_DIR = r"C:\YT_Downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Bộ nhớ đệm dùng chung an toàn giữa luồng Trình duyệt và luồng Flask
 state = {
     "screenshot": None,
     "latest_video": None,
@@ -31,32 +30,43 @@ REMOTE_UI_HTML = """
     </style>
 </head>
 <body class="flex flex-col h-screen">
-    <div class="bg-slate-900 border-b border-slate-700 p-2 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <div class="flex items-center gap-2">
-            <button onclick="switchTab(0)" class="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 rounded font-semibold">
-                🌐 Tab 1: Web Tool Của Bạn
+    <!-- Dòng 1: Chuyển Tab & Đổi trang web bất kỳ -->
+    <div class="bg-slate-900 border-b border-slate-800 px-2 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div class="flex items-center gap-1.5">
+            <button onclick="switchTab(0)" class="px-2.5 py-1.5 bg-purple-600 hover:bg-purple-500 rounded font-semibold">
+                🌐 Tab 1: Web Tool
             </button>
-            <button onclick="switchTab(1)" class="px-3 py-1.5 bg-red-600 hover:bg-red-500 rounded font-semibold">
+            <button onclick="switchTab(1)" class="px-2.5 py-1.5 bg-red-600 hover:bg-red-500 rounded font-semibold">
                 ▶️ Tab 2: YouTube Studio
             </button>
-            <button onclick="pushVideoToYT()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 rounded font-semibold">
-                ⚡ Đẩy Video Vừa Tải Sang YouTube
+            <button onclick="pushVideoToYT()" class="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 rounded font-semibold">
+                ⚡ Đẩy Video Sang YouTube
             </button>
         </div>
 
-        <div class="flex items-center gap-1.5 flex-1 max-w-xl">
-            <input type="text" id="vn_text" placeholder="Gõ Tiếng Việt (Tiêu đề, Mô tả, nội dung...) rồi bấm Gửi Chữ" 
-                   class="flex-1 px-2.5 py-1.5 rounded bg-slate-800 border border-slate-600 text-white text-xs">
-            <button onclick="sendText()" class="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 rounded font-semibold">Gửi Chữ</button>
-            <button onclick="sendKey('Enter')" class="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">Enter</button>
-            <button onclick="sendKey('Backspace')" class="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">Xóa</button>
-            <button onclick="scrollPage(-400)" class="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">▲ Lên</button>
-            <button onclick="scrollPage(400)" class="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 rounded">▼ Xuống</button>
+        <!-- Thanh địa chỉ để chuyển trang web ngay lập tức -->
+        <div class="flex items-center gap-1 flex-1 max-w-md">
+            <input type="text" id="goto_url" placeholder="Nhập link web muốn mở (vd: https://...) rồi bấm Đi tới" 
+                   class="flex-1 px-2 py-1 rounded bg-slate-800 border border-slate-600 text-white text-xs">
+            <button onclick="navigateUrl()" class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 rounded font-semibold">
+                Đi tới
+            </button>
         </div>
 
         <div id="file-status" class="text-emerald-400 font-mono text-[11px]">
             Đang kết nối hình ảnh...
         </div>
+    </div>
+
+    <!-- Dòng 2: Gõ Tiếng Việt & Phím điều hướng -->
+    <div class="bg-slate-950 border-b border-slate-800 px-2 py-1 flex items-center gap-1.5 text-xs">
+        <input type="text" id="vn_text" placeholder="Gõ Tiếng Việt (Tiêu đề, Mô tả, tìm kiếm...) rồi bấm Gửi Chữ" 
+               class="flex-1 px-2.5 py-1 rounded bg-slate-800 border border-slate-700 text-white text-xs">
+        <button onclick="sendText()" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded font-semibold">Gửi Chữ</button>
+        <button onclick="sendKey('Enter')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded">Enter</button>
+        <button onclick="sendKey('Backspace')" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded">Xóa</button>
+        <button onclick="scrollPage(-400)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded">▲ Lên</button>
+        <button onclick="scrollPage(400)" class="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 rounded">▼ Xuống</button>
     </div>
 
     <div class="flex-1 flex items-center justify-center bg-black overflow-auto">
@@ -87,6 +97,17 @@ REMOTE_UI_HTML = """
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ type: 'click', x, y })
+            });
+        }
+
+        async function navigateUrl() {
+            let url = document.getElementById('goto_url').value.trim();
+            if (!url) return;
+            if (!url.startsWith('http')) url = 'https://' + url;
+            await fetch('/action', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ type: 'goto', url })
             });
         }
 
@@ -141,18 +162,15 @@ REMOTE_UI_HTML = """
 
 def handle_download(download):
     save_path = os.path.join(DOWNLOAD_DIR, download.suggested_filename)
-    print(f"[*] Đang tải file về VPS: {save_path}", flush=True)
     download.save_as(save_path)
     state["latest_video"] = save_path
     state["status_text"] = f"Đã tải xong: {download.suggested_filename}"
-    print(f"[+] Hoàn tất tải về: {save_path}", flush=True)
 
 def safe_add_cookies(context, cookies_raw):
     try:
         cookies = json.loads(cookies_raw)
         if not isinstance(cookies, list):
             return
-        added = 0
         for c in cookies:
             try:
                 item = {
@@ -166,12 +184,10 @@ def safe_add_cookies(context, cookies_raw):
                 ss = str(c.get("sameSite", "")).lower()
                 item["sameSite"] = ss.capitalize() if ss in ["strict", "lax", "none"] else "Lax"
                 context.add_cookies([item])
-                added += 1
             except Exception:
                 continue
-        print(f"[+] Đã nạp thành công {added} cookies.", flush=True)
-    except Exception as e:
-        print(f"[!] Bỏ qua lỗi định dạng Cookie: {e}", flush=True)
+    except Exception:
+        pass
 
 def browser_worker():
     tool_url = os.environ.get("TOOL_URL", "https://www.google.com").strip() or "https://www.google.com"
@@ -180,18 +196,13 @@ def browser_worker():
     if cookies_b64:
         try:
             cookies_raw = base64.b64decode(cookies_b64.encode("utf-8")).decode("utf-8")
-        except Exception as e:
-            print("Lỗi giải mã cookie:", e, flush=True)
+        except Exception:
+            pass
 
     with sync_playwright() as p:
-        # Chạy trình duyệt với cấu hình chống phát hiện bot và tương thích màn hình ảo Windows Server
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--window-size=1280,720",
-                "--no-sandbox"
-            ]
+            args=["--disable-blink-features=AutomationControlled", "--window-size=1280,720", "--no-sandbox"]
         )
         context = browser.new_context(
             viewport={"width": 1280, "height": 720},
@@ -200,7 +211,6 @@ def browser_worker():
         )
 
         pages = []
-
         def on_new_page(new_p):
             new_p.set_viewport_size({"width": 1280, "height": 720})
             new_p.on("download", handle_download)
@@ -208,30 +218,24 @@ def browser_worker():
                 pages.append(new_p)
 
         context.on("page", on_new_page)
-
         if cookies_raw:
             safe_add_cookies(context, cookies_raw)
 
-        # Tab 1: Mở trang Web Tool
         page1 = context.new_page()
-        state["status_text"] = "Đang mở Tab 1 (Web Tool)..."
         try:
-            page1.goto(tool_url, wait_until="domcontentloaded", timeout=35000)
-        except Exception as e:
-            print(f"[!] Tab 1 tải lâu nhưng vẫn tiếp tục: {e}", flush=True)
+            page1.goto(tool_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
 
-        # Tab 2: Mở YouTube Studio
         page2 = context.new_page()
-        state["status_text"] = "Đang mở Tab 2 (YouTube Studio)..."
         try:
-            page2.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=35000)
-        except Exception as e:
-            print(f"[!] Tab 2 tải lâu nhưng vẫn tiếp tục: {e}", flush=True)
+            page2.goto("https://studio.youtube.com", wait_until="domcontentloaded", timeout=30000)
+        except Exception:
+            pass
 
         active_page = page1
-        state["status_text"] = "🟢 Sẵn sàng thao tác (Chưa có file tải về)"
+        state["status_text"] = "🟢 Sẵn sàng thao tác"
 
-        # Vòng lặp chính: vừa xử lý thao tác chuột/phím, vừa cập nhật ảnh màn hình trên cùng 1 luồng
         while True:
             while not state["action_queue"].empty():
                 act = state["action_queue"].get_nowait()
@@ -239,6 +243,10 @@ def browser_worker():
                 try:
                     if act_type == "click":
                         active_page.mouse.click(act["x"], act["y"])
+                    elif act_type == "goto":
+                        state["status_text"] = f"Đang mở {act['url']}..."
+                        active_page.goto(act["url"], wait_until="domcontentloaded", timeout=30000)
+                        state["status_text"] = "🟢 Đã mở trang thành công"
                     elif act_type == "fill_text":
                         active_page.keyboard.insert_text(act["text"])
                     elif act_type == "press":
@@ -257,13 +265,12 @@ def browser_worker():
                             active_page.locator('input[type="file"]').first.set_input_files(state["latest_video"])
                             state["status_text"] = "✅ Đã nạp video vào YouTube Studio!"
                 except Exception as e:
-                    print(f"[!] Lỗi thực thi thao tác {act_type}: {e}", flush=True)
+                    print("Lỗi thao tác:", e, flush=True)
 
             try:
                 state["screenshot"] = active_page.screenshot(type="jpeg", quality=70)
-            except Exception as e:
-                print(f"[!] Lỗi chụp màn hình: {e}", flush=True)
-
+            except Exception:
+                pass
             time.sleep(0.25)
 
 @app.route("/")
@@ -273,17 +280,12 @@ def index():
 @app.route("/status")
 def get_status():
     name = os.path.basename(state["latest_video"]) if state["latest_video"] else None
-    return jsonify({
-        "latest_video": name,
-        "status_text": state["status_text"]
-    })
+    return jsonify({"latest_video": name, "status_text": state["status_text"]})
 
 @app.route("/screenshot")
 def screenshot():
     img = state.get("screenshot")
-    if not img:
-        return Response(status=204)
-    return Response(img, mimetype="image/jpeg")
+    return Response(img, mimetype="image/jpeg") if img else Response(status=204)
 
 @app.route("/action", methods=["POST"])
 def action():
@@ -293,11 +295,9 @@ def action():
             return jsonify({"message": "Chưa có video nào được tải về trên VPS!"})
         state["action_queue"].put(data)
         return jsonify({"message": "Đang chuyển sang Tab YouTube và nạp video..."})
-
     state["action_queue"].put(data)
     return jsonify({"ok": True})
 
 if __name__ == "__main__":
-    t = threading.Thread(target=browser_worker, daemon=True)
-    t.start()
+    threading.Thread(target=browser_worker, daemon=True).start()
     app.run(host="127.0.0.1", port=8080, threaded=True)
